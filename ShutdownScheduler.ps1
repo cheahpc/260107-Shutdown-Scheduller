@@ -3,7 +3,7 @@
 
 $ErrorActionPreference = 'Stop'
 
-$TaskPath = "\\ShutdownScheduler\\"
+$TaskPath = "\ShutdownScheduler\"
 $Title = "Shutdown Scheduler"
 
 function Set-WindowTitle {
@@ -85,17 +85,16 @@ function Create-Schedule([string]$Type, [TimeSpan]$Delay) {
     $action = New-ActionForType $Type
     $trigger = New-ScheduledTaskTrigger -Once -At $target
 
-    $principal = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive -RunLevel Highest
-    $settings = New-ScheduledTaskSettingsSet -Compatibility Win8 -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries -ExecutionTimeLimit ([TimeSpan]::FromHours(1))
+    # Simplified principal - use current user without RunLevel
+    $principal = New-ScheduledTaskPrincipal -UserId ([System.Security.Principal.WindowsIdentity]::GetCurrent().Name) -LogonType Interactive
+    $settings = New-ScheduledTaskSettingsSet -StartWhenAvailable -AllowStartIfOnBatteries -DontStopIfGoingOnBatteries
 
-    $name = 'SS_{0}_{1:yyyyMMdd_HHmmss}' -f $Type, $target
-    $desc = 'Type: {0}; Created: {1:yyyy-MM-dd HH:mm:ss}' -f $Type, (Get-Date)
+    # Use simpler task name format to avoid special characters
+    $timestamp = Get-Date -Format 'yyyyMMdd_HHmmss'
+    $name = "SS_{0}_{1}" -f $Type, $timestamp
+    $desc = "Type: {0}; Created: {1:yyyy-MM-dd HH:mm:ss}" -f $Type, (Get-Date)
 
-    try {
-        Register-ScheduledTask -TaskName $name -TaskPath $TaskPath -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $desc | Out-Null
-    } catch {
-        throw "Failed to register scheduled task. Try running as Administrator. Error: $($_.Exception.Message)"
-    }
+    Register-ScheduledTask -TaskName $name -TaskPath $TaskPath -Action $action -Trigger $trigger -Principal $principal -Settings $settings -Description $desc -ErrorAction Stop | Out-Null
 }
 
 function Draw-MainScreen() {
@@ -109,15 +108,33 @@ function Draw-MainScreen() {
 
     $active = Get-ActiveSchedule
     if ($null -ne $active) {
-        Write-Host "Scheduled: $($active.Type)" -ForegroundColor Yellow
+        $rem = $active.TimeRemaining
+        $days = [int]$rem.Days
+        $hours = [int]$rem.Hours
+        $minutes = [int]$rem.Minutes
+        $seconds = [int]$rem.Seconds
+        
+        Write-Host "Scheduled Action: $($active.Type)" -ForegroundColor Yellow
+        Write-Host "ID: $($active.Name)" -ForegroundColor DarkYellow
         Write-Host "Runs At: $($active.NextRunTime.ToString('yyyy-MM-dd HH:mm:ss'))"
+        
+        $timeStr = @()
+        if ($days -gt 0) { $timeStr += "$days day(s)" }
+        if ($hours -gt 0) { $timeStr += "$hours hour(s)" }
+        if ($minutes -gt 0) { $timeStr += "$minutes minute(s)" }
+        if ($seconds -gt 0) { $timeStr += "$seconds second(s)" }
+        if ($timeStr.Count -eq 0) { $timeStr += "less than 1 second" }
+        
+        Write-Host "Time Until $($active.Type): $($timeStr -join ', ')" -ForegroundColor Green
     } else {
         Write-Host "No scheduled action detected." -ForegroundColor DarkGray
     }
 
     Write-Host ""
-    Write-Host "Menu: [S]chedule  [A]bort  [Q]uit" -ForegroundColor White
-    Write-Host "Enter your choice and press Enter." -ForegroundColor DarkGray
+    Write-Host "Menu: [S]chedule  [A]bort  [R]efresh  [Q]uit" -ForegroundColor White
+    Write-Host "Enter your choice" -ForegroundColor DarkGray
+    Write-Host ""
+    [Console]::Out.Flush()
 }
 
 function Prompt-Int($label, [int]$current) {
@@ -134,6 +151,12 @@ function Prompt-Int($label, [int]$current) {
 }
 
 function Schedule-Wizard() {
+    # Clear keyboard buffer before starting
+    while ([Console]::KeyAvailable) {
+        [void][Console]::ReadKey($true)
+    }
+    Start-Sleep -Milliseconds 100
+    
     $days = 0; $hours = 0; $minutes = 0; $seconds = 0
     $types = @('Shutdown','Restart','Logoff','Sleep','Hibernate')
     $typeIndex = 0
@@ -166,67 +189,133 @@ function Schedule-Wizard() {
         Write-Host "Will run at: $($target.ToString('yyyy-MM-dd HH:mm:ss'))"
         Write-Host ""
         Write-Host "Options:" -ForegroundColor White
-        Write-Host "  Edit [D]ays   Edit [H]ours   Edit [M]inutes   Edit [S]econds"
-        Write-Host "  Edit [T]ype   [C]reate Schedule   Esc) Cancel"
-        $key = $Host.UI.RawUI.ReadKey('NoEcho,IncludeKeyUp')
-        switch ($key.VirtualKeyCode) {
-            68 { $days = Prompt-Int 'Days' $days }      # D
-            72 { $hours = Prompt-Int 'Hours' $hours }   # H
-            77 { $minutes = Prompt-Int 'Minutes' $minutes } # M
-            83 { $seconds = Prompt-Int 'Seconds' $seconds } # S
-            84 { $typeIndex = ($typeIndex + 1) % $types.Count } # T
-            67 { # C (Create)
-                if ($ts.TotalSeconds -lt 1) { Write-Host "Please set a delay greater than 0 before creating." -ForegroundColor Red; Start-Sleep 1; continue }
+        Write-Host "  Edit [T]ype | [D]ays | [H]ours | [M]inutes | [S]econds"
+        Write-Host ""
+        Write-Host "  [C]reate Schedule   [Esc] Cancel"
+        Write-Host ""
+        Write-Host "Choice: " -NoNewline
+        [Console]::Out.Flush()
+
+        # Drain any buffered keys before reading a fresh one
+        while ([Console]::KeyAvailable) { [void][Console]::ReadKey($true) }
+
+        # Read a single KeyDown event using Console API (more reliable across hosts)
+        $key = [Console]::ReadKey($true)
+        # Echo the selected choice next to the prompt, then move to a new line
+        Write-Host $key.KeyChar
+
+        switch ($key.Key) {
+            ([ConsoleKey]::D) { $days = Prompt-Int 'Days' $days }
+            ([ConsoleKey]::H) { $hours = Prompt-Int 'Hours' $hours }
+            ([ConsoleKey]::M) { $minutes = Prompt-Int 'Minutes' $minutes }
+            ([ConsoleKey]::S) { $seconds = Prompt-Int 'Seconds' $seconds }
+            ([ConsoleKey]::T) { $typeIndex = ($typeIndex + 1) % $types.Count }
+            ([ConsoleKey]::C) { # C (Create)
+                if ($ts.TotalSeconds -lt 1) { 
+                    Write-Host ""
+                    Write-Host "Please set a delay greater than 0 before creating." -ForegroundColor Red
+                    Write-Host "Press any key to continue..." -ForegroundColor DarkGray
+                    [void][Console]::ReadKey($true)
+                    continue 
+                }
+                Write-Host ""
+                Write-Host "Creating Schedule..." -ForegroundColor Cyan
                 try {
                     # Remove existing schedules before creating new one
                     Remove-AllSchedules
                     Create-Schedule -Type $types[$typeIndex] -Delay $ts
                     Write-Host "Scheduled $($types[$typeIndex]) successfully." -ForegroundColor Green
-                    Start-Sleep 1
-                    return
+                    Write-Host ""
+                    Write-Host "Press any key to modify schedule, or wait 5 seconds to return to main menu..." -ForegroundColor Yellow
+
+                    # Wait up to 5 seconds for keypress
+                    $waited = 0
+                    $keyPressed = $false
+                    while ($waited -lt 5000) {
+                        if ([Console]::KeyAvailable) {
+                            [void][Console]::ReadKey($true)
+                            $keyPressed = $true
+                            break
+                        }
+                        Start-Sleep -Milliseconds 100
+                        $waited += 100
+                    }
+
+                    if ($keyPressed) {
+                        # Reload the schedule for modification
+                        $existing = Get-ActiveSchedule
+                        if ($null -ne $existing) {
+                            $ts = $existing.TimeRemaining
+                            if ($ts.TotalSeconds -gt 0) {
+                                $days = [int]$ts.Days
+                                $hours = [int]$ts.Hours
+                                $minutes = [int]$ts.Minutes
+                                $seconds = [int]$ts.Seconds
+                                for ($i = 0; $i -lt $types.Count; $i++) {
+                                    if ($types[$i] -eq $existing.Type) { $typeIndex = $i; break }
+                                }
+                            }
+                        }
+                        continue
+                    } else {
+                        return
+                    }
                 } catch {
-                    Write-Host $_.Exception.Message -ForegroundColor Red
+                    Write-Host ""
+                    Write-Host "Failed to create schedule: $($_.Exception.Message)" -ForegroundColor Red
                     Write-Host "Press any key to return..." -ForegroundColor DarkGray
                     [void][Console]::ReadKey($true)
                     return
                 }
             }
-            27 { return } # Esc
+            ([ConsoleKey]::Escape) { return }
             default { }
         }
     }
 }
 
 function Cancel-Flow() {
-    Clear-Host
-    Set-WindowTitle
+    Write-Host ""
     $tasks = Get-Tasks
     if (-not $tasks -or $tasks.Count -eq 0) {
         Write-Host "Nothing to cancel." -ForegroundColor DarkGray
-        Start-Sleep 1
+        Write-Host "Press any key to continue..." -ForegroundColor DarkGray
+        [void][Console]::ReadKey($true)
         return
     }
     Write-Host "The following scheduled items will be removed:" -ForegroundColor Yellow
-    $tasks | ForEach-Object { Write-Host " - $($_.TaskName)" }
-    $ans = Read-Host "Type YES to confirm"
-    if ($ans -eq 'YES') {
+    $tasks | ForEach-Object { Write-Host " - ID: $($_.TaskName)" }
+    $ans = Read-Host "Abort schedule? (Y/N)"
+    if ($ans -match '^[Yy]$') {
         Remove-AllSchedules
         Write-Host "Cancelled all scheduled items." -ForegroundColor Green
-        Start-Sleep 1
+        Write-Host "Press any key to continue..." -ForegroundColor DarkGray
+        [void][Console]::ReadKey($true)
     }
 }
 
 # Main UI loop (static display, no auto-refresh)
 while ($true) {
     Draw-MainScreen
-    $choice = Read-Host "Choice (S/A/Q)"
-    switch ($choice.ToUpperInvariant()) {
-        'S' { Schedule-Wizard }
-        'A' { Cancel-Flow }
-        'Q' { break }
+    Write-Host "Choice: " -NoNewline
+    [Console]::Out.Flush()
+    $key = [Console]::ReadKey($true)
+    Write-Host $key.KeyChar
+    
+    # Clear any remaining buffered keys
+    while ([Console]::KeyAvailable) {
+        [void][Console]::ReadKey($true)
+    }
+    
+    switch ($key.Key) {
+        ([ConsoleKey]::S) { Schedule-Wizard }
+        ([ConsoleKey]::A) { Cancel-Flow }
+        ([ConsoleKey]::R) { } # Refresh - just redraw by continuing loop
+        ([ConsoleKey]::Q) { return }
         default {
-            Write-Host "Unknown choice. Please enter S, A, or Q." -ForegroundColor Red
-            Start-Sleep 1
+            Write-Host "Unknown choice. Please enter S, A, R, or Q." -ForegroundColor Red
+            Write-Host "Press any key to continue..." -ForegroundColor DarkGray
+            [void][Console]::ReadKey($true)
         }
     }
 }
