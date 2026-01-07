@@ -291,7 +291,7 @@ function Abort-Flow($Schedules) {
         return
     }
 
-    if ($n -lt 1 -or $n -gt $Schedules.Count) {
+    if ($n -lt 1 -or $n -gt @($Schedules).Count) {
         Write-Host "Number out of range." -ForegroundColor Red
         Write-Host "Press any key to continue..." -ForegroundColor DarkGray
         [void][Console]::ReadKey($true)
@@ -323,7 +323,7 @@ function Modify-Flow($Schedules) {
         [void][Console]::ReadKey($true)
         return
     }
-    if ($n -lt 1 -or $n -gt $Schedules.Count) {
+    if ($n -lt 1 -or $n -gt @($Schedules).Count) {
         Write-Host "Number out of range." -ForegroundColor Red
         Write-Host "Press any key to continue..." -ForegroundColor DarkGray
         [void][Console]::ReadKey($true)
